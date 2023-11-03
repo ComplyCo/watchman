@@ -85,13 +85,17 @@ var (
 	Failure int64 = 1
 )
 
+type ChanResult struct {
+	Index int
+	Value string
+}
+
 func processRows(rows []string, threshold float64, api *moov.APIClient) int64 {
 	// First row is headers, store them
 	headings := rows[0]
 	rows = rows[1:]
 
 	var wg sync.WaitGroup
-	wg.Add(len(rows))
 
 	var exitCode int64 // must be protected with atomic calls
 	markFailure := func() {
@@ -99,12 +103,13 @@ func processRows(rows []string, threshold float64, api *moov.APIClient) int64 {
 	}
 
 	workers := syncutil.NewGate(*flagWorkers)
-	resultsChan := make(chan string, len(rows))
+	resultsChan := make(chan ChanResult, len(rows))
 	output := make([]string, len(rows)+1) // +1 for header row
 
-	for i := range rows {
+	for i, row := range rows {
+		wg.Add(1)
 		workers.Start()
-		go func(row string) {
+		go func(i int, row string) {
 			defer workers.Done()
 			defer wg.Done()
 
@@ -120,16 +125,16 @@ func processRows(rows []string, threshold float64, api *moov.APIClient) int64 {
 					if *flagVerbose {
 						log.Print(newSearchResultString(result, name))
 					}
-					resultsChan <- newSearchResultRecord(result, row)
+					resultsChan <- ChanResult{Value: newSearchResultRecord(result, row), Index: i}
 
 				} else {
 					if *flagVerbose {
 						log.Printf("[RESULT] no hits for %s", name)
 					}
-					resultsChan <- newSearchResultClearRecord(result, row)
+					resultsChan <- ChanResult{Value: newSearchResultClearRecord(result, row), Index: i}
 				}
 			}
-		}(rows[i])
+		}(i, row)
 	}
 
 	go func() {
@@ -138,22 +143,20 @@ func processRows(rows []string, threshold float64, api *moov.APIClient) int64 {
 	}()
 
 	output[0] = writeHeadings(headings)
-	count := 1
 	for r := range resultsChan {
-		output[count] = r
-		count++
+		output[r.Index+1] = r.Value // +1 for header row
 	}
 
 	if *flagVerbose {
 		fmt.Print("\n\n")
-		for i := range output[0:count] {
+		for i := range output {
 			fmt.Printf("%s\n", output[i])
 		}
 		fmt.Print("\n\n")
 	}
 
 	if *flagWriteFile {
-		if err := writeResultsToFile(output[0:count]); err != nil {
+		if err := writeResultsToFile(output); err != nil {
 			log.Printf("[FATAL] problem writing to file: %v", err)
 		}
 	}
