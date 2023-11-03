@@ -97,7 +97,7 @@ func checkNames(names []string, threshold float64, api *moov.APIClient) int64 {
 
 	workers := syncutil.NewGate(*flagWorkers)
 	resultsChan := make(chan string, len(names))
-	output := make([]string, len(names)*5) // 5X enough space for all results?
+	output := make([]string, len(names))
 
 	// TODO add to file?
 	if *flagVerbose {
@@ -114,18 +114,17 @@ func checkNames(names []string, threshold float64, api *moov.APIClient) int64 {
 				markFailure()
 				log.Printf("[FATAL] problem searching for '%s': %v", name, err)
 			} else {
-				for i := range result {
-					if !result[i].IsSet {
-						if *flagVerbose {
-							log.Printf("[RESULT] no hits for %s", name)
-						}
-						return
-					}
+				if result.IsSet {
 					if *flagVerbose {
-						log.Print(newSearchResultString(result[i], name))
+						log.Print(newSearchResultString(result, name))
 					}
+					resultsChan <- newSearchResultRecord(result, name)
 
-					resultsChan <- newSearchResultRecord(result[i], name)
+				} else {
+					if *flagVerbose {
+						log.Printf("[RESULT] no hits for %s", name)
+					}
+					resultsChan <- newSearchResultClearRecord(result, name)
 				}
 			}
 		}(names[i])
@@ -136,8 +135,8 @@ func checkNames(names []string, threshold float64, api *moov.APIClient) int64 {
 		close(resultsChan)
 	}()
 
-	output[0] = writeSearchResultHeader()
-	count := 1
+	// output[0] = writeSearchResultHeader()
+	count := 0
 	for r := range resultsChan {
 		output[count] = r
 		count++
@@ -197,10 +196,13 @@ func newSearchParameterString() string {
 }
 
 func getNoun(score float64) string {
+	if score < 0.0 {
+		return "Clear"
+	}
 	if score >= *flagThreshold {
 		return "MATCH"
 	}
-	return "hit"
+	return "Hit"
 }
 
 func newSearchResultString(result moov.SearchResult, searched_name string) string {
@@ -236,6 +238,23 @@ func newSearchResultRecord(result moov.SearchResult, searched_name string) strin
 		result.Programs,
 		*flagSeparator,
 		result.Remarks,
+		*flagSeparator,
+		time.Now().Format(time.RFC3339),
+	)
+}
+
+func newSearchResultClearRecord(result moov.SearchResult, searched_name string) string {
+	return fmt.Sprintf(
+		"%s%s%s%s%s%s%v%s%s%s%s",
+		searched_name,
+		*flagSeparator,
+		getNoun(result.Score),
+		*flagSeparator,
+		*flagSeparator,
+		*flagSeparator,
+		*flagSeparator,
+		*flagSeparator,
+		*flagSeparator,
 		*flagSeparator,
 		time.Now().Format(time.RFC3339),
 	)
@@ -278,12 +297,9 @@ func newSearchResult(query_result moov.OfacSdn, entity_id string, score float64)
  * Search OFAC data for given name.
  * If no SDN but altNames, get data for each altName's EntityID.
  *
- * return entityID the EntityID of matched SDN, nil if nothing found
- * return score the match percentage, or -1.0 if nothing found
- * return programs array of strings containing matching OFAC programs, empty (not nil) if nothing found
- * return error only if an error is thrown from search calls
+ * return SearchResult struct with: EntityID, SdnName, Type, Score, Programs
  */
-func searchByName(api *moov.APIClient, name string) ([]moov.SearchResult, error) {
+func searchByName(api *moov.APIClient, name string) (moov.SearchResult, error) {
 	opts := &moov.SearchOpts{
 		Limit:      optional.NewInt32(5),
 		Name:       optional.NewString(name),
@@ -291,14 +307,14 @@ func searchByName(api *moov.APIClient, name string) ([]moov.SearchResult, error)
 		SdnType:    optional.NewInterface(*flagSdnType),
 		XRequestID: optional.NewString(*flagRequestID),
 	}
-	empty_result := []moov.SearchResult{{
+	empty_result := moov.SearchResult{
 		IsSet:    false,
 		EntityID: nil,
 		SdnName:  nil,
 		Type:     "",
-		Score:    0.0,
+		Score:    -1.0, // -1.0 indicates nothin found
 		Programs: []string{},
-	}}
+	}
 
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer cancelFunc()
@@ -313,20 +329,11 @@ func searchByName(api *moov.APIClient, name string) ([]moov.SearchResult, error)
 		log.Printf("[VERBOSE] search_result SDNs=%d; AltNames=%d", len(search_result.SDNs), len(search_result.AltNames))
 	}
 
-	// Prefer to return SDNs if found
-	num_search_results := len(search_result.SDNs)
-	if num_search_results > 0 {
-		results := make([]moov.SearchResult, num_search_results)
-
-		for i := 0; i < num_search_results; i++ {
-			if *flagVerbose {
-				log.Printf("[VERBOSE] search_result.SDNs[%d]=%s (%v)", i, search_result.SDNs[i].SdnName, search_result.SDNs[i].SdnType)
-			}
-			sdn := search_result.SDNs[i]
-			results[i] = newSearchResult(sdn, sdn.EntityID, float64(sdn.Match))
-		}
-
-		return results, nil
+	// Return SDN if found
+	if len(search_result.SDNs) > 0 {
+		// Only return the best match
+		sdn := search_result.SDNs[0]
+		return newSearchResult(sdn, sdn.EntityID, float64(sdn.Match)), nil
 	}
 
 	//  If no SDN for name, check "customer" via EntityID
@@ -347,9 +354,7 @@ func searchByName(api *moov.APIClient, name string) ([]moov.SearchResult, error)
 		}
 
 		if customer_result.Sdn.EntityID == altEntityID {
-			return []moov.SearchResult{
-				newSearchResult(customer_result.Sdn, altEntityID, float64(search_result.AltNames[0].Match)),
-			}, nil
+			return newSearchResult(customer_result.Sdn, altEntityID, float64(search_result.AltNames[0].Match)), nil
 		}
 
 		// If no customer for altName, try companies
@@ -363,13 +368,9 @@ func searchByName(api *moov.APIClient, name string) ([]moov.SearchResult, error)
 			log.Printf("[VERBOSE] company_result=%v", company_result)
 		}
 		if company_result.Sdn.EntityID == altEntityID {
-			return []moov.SearchResult{
-				newSearchResult(company_result.Sdn, altEntityID, float64(search_result.AltNames[0].Match)),
-			}, nil
+			return newSearchResult(company_result.Sdn, altEntityID, float64(search_result.AltNames[0].Match)), nil
 		}
-
 	}
 
-	// Nothing to return
 	return empty_result, nil
 }
