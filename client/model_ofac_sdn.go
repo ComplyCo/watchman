@@ -15,7 +15,7 @@ type OfacSdn struct {
 	SdnName  string  `json:"sdnName,omitempty"`
 	SdnType  SdnType `json:"sdnType,omitempty"`
 	// Programs is the sanction programs this SDN was added from
-	Programs []string `json:"programs,omitempty"`
+	Programs []string `json:"program,omitempty"`
 	Title    string   `json:"title,omitempty"`
 	// Remarks on SDN and often additional information about the SDN
 	Remarks string `json:"remarks,omitempty"`
