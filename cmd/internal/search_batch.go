@@ -2,7 +2,10 @@
 // Use of this source code is governed by an Apache License
 // license that can be found in the LICENSE file.
 
-// Extended by ComplyCo for batch searches
+/*
+ * Extended by ComplyCo for batch searches
+ * This is in cmd/internal package so it can be imported into the server and the CLI code
+ */
 
 package internal
 
@@ -10,7 +13,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +33,73 @@ var (
 	flagSdnType      = flag.String("sdn-type", "individual", "sdnType query param")
 	flagThreshold    = flag.Float64("threshold", 0.99, "Minimum match percentage required for blocking")
 )
+
+func SearchBatch(logger log.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		err := r.ParseMultipartForm(128 << 20) // 128 MB limit for file size
+		if err != nil {
+			http.Error(w, "Unable to parse form", http.StatusBadRequest)
+			return
+		}
+		setFlagsFromFormFields(r)
+
+		file, handler, err := r.FormFile("csvFile")
+		if err != nil {
+			http.Error(w, "Unable to get file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		input, err := io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "Unable to read file content", http.StatusInternalServerError)
+			return
+		}
+
+		rows := strings.Split(string(input), "\n")
+		conf := Config(DefaultApiAddress, true)
+		api := moov.NewAPIClient(conf)
+		result, err := ProcessRows(rows, api, logger)
+		if err != nil {
+			http.Error(w, "Unable to process input", http.StatusInternalServerError)
+			return
+		}
+		output := strings.Join(result, "\n")
+
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", handler.Filename))
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Length", fmt.Sprint(len(output)))
+
+		_, err = w.Write([]byte(output))
+		if err != nil {
+			http.Error(w, "Unable to write response", http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+func setFlagsFromFormFields(r *http.Request) {
+	if threshold := r.FormValue("threshold"); threshold != "" {
+		if f, err := strconv.ParseFloat(threshold, 64); err == nil {
+			*flagThreshold = f
+		}
+	} else {
+		*flagThreshold = 0.99
+	}
+	if min_match := r.FormValue("min-match"); min_match != "" {
+		if f, err := strconv.ParseFloat(min_match, 64); err == nil {
+			*flagMinNameScore = f
+		}
+	} else {
+		*flagMinNameScore = 0.90
+	}
+	if sdn_type := r.FormValue("sdn-type"); sdn_type != "" {
+		*flagSdnType = sdn_type
+	}
+	if request_id := r.FormValue("request-id"); request_id != "" {
+		*flagRequestID = request_id
+	}
+}
 
 type ChanResult struct {
 	Index int
