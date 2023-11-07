@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import * as R from "ramda";
 import styled from "styled-components/macro"; // eslint-disable-line no-unused-vars
 import MButton from "@material-ui/core/Button";
@@ -10,6 +10,7 @@ import Slider from "./Slider";
 import { countryOptionData, listOptionData } from "./data";
 import { parseQueryString } from "utils";
 import { useTypeOptions, useProgramOptions } from "./options";
+import { saveAs } from "file-saver";
 
 const Button = styled(MButton)`
   margin: 1em;
@@ -47,12 +48,13 @@ const initialValues = {
   zip: "",
   limit: 10,
   q: "",
-  sdnType: "",
-  program: ""
+  sdnType: "individual",
+  program: "",
+  threshold: 99,
   // disabled ///////////
   // idNumber: "",
   // list: "All",
-  // score: 100
+  score: 100
 };
 
 // eslint-disable-next-line
@@ -81,6 +83,46 @@ export default ({ onSubmit, onReset }) => {
     onReset();
   };
 
+  const [selectedFile, setSelectedFile] = useState(null);
+
+  const handleFileSelect = (e) => {
+    setSelectedFile(e.target.files[0]);
+  };
+
+  const handleBatchSearchClick = (e) => {  
+    const formData = new FormData();
+    if (selectedFile) {
+      formData.append("csvFile", selectedFile);
+    } else {
+      alert("Please select a CSV file!");
+      return;
+    }
+    formData.append("sdnType", values.sdnType);
+    formData.append("min-match", values.score / 100);
+    formData.append("threshold", values.threshold / 100);
+
+    fetch("/search/batch", {
+      method: "POST",
+      body: formData
+    })
+      .then(response => {
+        if (response.ok) {
+          return response.text();
+        } else {
+          throw new Error("Request failed with status: " + response.status);
+        }
+      })
+      .then(data => {
+        const blob = new Blob([data], { type: "text/csv" });
+        const timestamp = new Date().toISOString().replace(/[-:]/g, "");
+        const filename = `cc_ofac_search_results_${timestamp}.csv`;
+        saveAs(blob, filename);
+      })
+      .catch(error => {
+        console.error("Error:", error);
+      });
+  };
+  
   // eslint-disable-next-line
   const submit = useCallback(onSubmit, []);
   useEffect(() => {
@@ -97,6 +139,67 @@ export default ({ onSubmit, onReset }) => {
 
   return (
     <Container>
+      <form
+        onSubmit={e => {
+          e.preventDefault();
+          handleBatchSearchClick();
+        }}
+      >
+        <C.Section style={{ width: "50%"}}>
+          <C.SectionTitle>Batch Search</C.SectionTitle>
+          <Cell style={{ paddingTop: "1em", width: "75%" }}>
+            <Slider
+              label="Minimum Name Score"
+              id="score-slider"
+              value={values["score"]}
+              onChange={handleChangeSlider("score")}
+              min={50}
+              max={100}
+              valueLabelDisplay="auto"
+            />
+            &nbsp;&nbsp;
+            {values["score"]}
+          </Cell>
+          <Cell style={{ paddingTop: "1em", width: "75%" }}>
+            <Slider
+              label="Match Threshold"
+              id="threshold-slider"
+              value={values["threshold"]}
+              onChange={handleChangeSlider("threshold")}
+              min={50}
+              max={100}
+              valueLabelDisplay="auto"
+            />
+            &nbsp;&nbsp;
+            {values["threshold"]}
+          </Cell>
+          <Cell style={{ width: "75%" }}>
+            <Select
+              label="Type"
+              id="sdnType"
+              value={values["sdnType"]}
+              onChange={handleChange("sdnType")}
+              options={typeOptionValues}
+            />
+          </Cell>
+          <Cell style={{ paddingTop: "1em", width: "75%" }}>
+            <label>CSV File:</label>
+            &nbsp;&nbsp;
+            <input type="file" onChange={handleFileSelect} />
+          </Cell>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Cell>
+              <ButtonSet>
+                <Button variant="contained" color="primary" type="submit">
+                  Search
+                </Button>
+              </ButtonSet>
+            </Cell>
+          </div>
+        </C.Section>
+      </form>
+      <br /><br /><br /><br /><br />
+
       <form
         onSubmit={e => {
           e.preventDefault();
