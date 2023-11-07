@@ -95,6 +95,8 @@ func setFlagsFromFormFields(r *http.Request) {
 	}
 	if sdn_type := r.FormValue("sdn-type"); sdn_type != "" {
 		*flagSdnType = sdn_type
+	} else {
+		*flagSdnType = "individual"
 	}
 	if request_id := r.FormValue("request-id"); request_id != "" {
 		*flagRequestID = request_id
