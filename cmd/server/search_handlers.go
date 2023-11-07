@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/prometheus"
 	"github.com/gorilla/mux"
+	internal "github.com/moov-io/watchman/cmd/internal"
 	stdprometheus "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -37,6 +38,7 @@ func addSearchRoutes(logger log.Logger, r *mux.Router, searcher *searcher) {
 	r.Methods("GET").Path("/search/us-csl").HandlerFunc(searchUSCSL(logger, searcher))
 	r.Methods("GET").Path("/search/eu-csl").HandlerFunc(searchEUCSL(logger, searcher))
 	r.Methods("GET").Path("/search/uk-csl").HandlerFunc(searchUKCSL(logger, searcher))
+	r.Methods("POST").Path("/search/batch").HandlerFunc(internal.SearchBatch(logger))
 }
 
 func extractSearchLimit(r *http.Request) int {

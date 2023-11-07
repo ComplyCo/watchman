@@ -921,6 +921,25 @@ paths:
       summary: Search US CSL
       tags:
       - Watchman
+  /search/batch:
+    post:
+      description: Search, in a batch
+      operationId: searchBatch
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                csvFile:
+                  type: string
+                  format: binary
+        required: true
+      responses:
+        "201":
+          description: SDNs returned from a search
+        "400":
+          description: Error occurred, see response body.
   /downloads:
     get:
       description: Return list of recent downloads of list data.
