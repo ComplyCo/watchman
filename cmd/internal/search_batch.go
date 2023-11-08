@@ -26,16 +26,20 @@ import (
 	"go4.org/syncutil"
 )
 
-var matchThreshold float64 = 0.99
-
 func SearchBatch(logger log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := r.ParseMultipartForm(128 << 20) // 128 MB limit for file size
+		err := r.ParseMultipartForm(10 << 20) // 10 MB limit for file size
 		if err != nil {
 			http.Error(w, "Unable to parse form", http.StatusBadRequest)
 			return
 		}
 		search_opts := newSearchOptsFromFormFields(r)
+		match_threshold := 0.99
+		if threshold := r.FormValue("threshold"); threshold != "" {
+			if f, err := strconv.ParseFloat(threshold, 64); err == nil {
+				match_threshold = f
+			}
+		}
 
 		file, handler, err := r.FormFile("csvFile")
 		if err != nil {
@@ -53,7 +57,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 		rows := strings.Split(string(input), "\n")
 		conf := Config(DefaultApiAddress, true)
 		api := moov.NewAPIClient(conf)
-		result, err := ProcessRows(rows, api, search_opts, logger)
+		result, err := ProcessRows(rows, api, search_opts, match_threshold, logger)
 		if err != nil {
 			http.Error(w, "Unable to process input", http.StatusInternalServerError)
 			return
@@ -79,13 +83,6 @@ func newSearchOptsFromFormFields(r *http.Request) moov.SearchOpts {
 		SdnType:  optional.NewInterface("individual"),
 	}
 
-	if threshold := r.FormValue("threshold"); threshold != "" {
-		if f, err := strconv.ParseFloat(threshold, 64); err == nil {
-			matchThreshold = f
-		}
-	} else {
-		matchThreshold = 0.99
-	}
 	if min_match := r.FormValue("min-match"); min_match != "" {
 		if f, err := strconv.ParseFloat(min_match, 64); err == nil {
 			search_opts.MinMatch = optional.NewFloat32(float32(f))
@@ -103,7 +100,7 @@ type ChanResult struct {
 	Value string
 }
 
-func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, log log.Logger) ([]string, error) {
+func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, threshold float64, log log.Logger) ([]string, error) {
 	// First row is headers, store them
 	headings := rows[0]
 	rows = rows[1:]
@@ -130,11 +127,11 @@ func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts
 			} else {
 				if result.IsSet {
 					// log.Debug().Log(newSearchResultString(result, name))
-					resultsChan <- ChanResult{Value: newSearchResultRecord(result, row), Index: i}
+					resultsChan <- ChanResult{Value: newSearchResultRecord(result, row, threshold), Index: i}
 
 				} else {
 					// log.Debug().Logf("[RESULT] no hits for %s", name)
-					resultsChan <- ChanResult{Value: newSearchResultClearRecord(result, row), Index: i}
+					resultsChan <- ChanResult{Value: newSearchResultClearRecord(result, row, threshold), Index: i}
 				}
 			}
 		}(i, row)
@@ -178,11 +175,11 @@ func trimDelimiters(s string) string {
 	return strings.Trim(s, ",\n\r\t")
 }
 
-func getNoun(score float64) string {
+func getNoun(score float64, threshold float64) string {
 	if score < 0.0 {
 		return "Clear"
 	}
-	if score >= matchThreshold {
+	if score >= threshold {
 		return "MATCH"
 	}
 	return "Hit"
@@ -203,7 +200,7 @@ func getNoun(score float64) string {
 // 	)
 // }
 
-func newSearchResultRecord(result moov.SearchResult, input_row string) string {
+func newSearchResultRecord(result moov.SearchResult, input_row string, threshold float64) string {
 	sdn_name_no_comma := *result.SdnName
 	if strings.Contains(*result.SdnName, ",") {
 		sdn_name_parts := strings.Split(*result.SdnName, ",")
@@ -213,7 +210,7 @@ func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 	return fmt.Sprintf(
 		"%s,%s,%s,%s,%.2f,%s,%s",
 		trimDelimiters(input_row),
-		getNoun(result.Score),
+		getNoun(result.Score, threshold),
 		sdn_name_no_comma,
 		*result.EntityID,
 		result.Score,
@@ -222,11 +219,11 @@ func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 	)
 }
 
-func newSearchResultClearRecord(result moov.SearchResult, searched_name string) string {
+func newSearchResultClearRecord(result moov.SearchResult, searched_name string, threshold float64) string {
 	return fmt.Sprintf(
 		"%s,%s,,,,,%s",
 		trimDelimiters(searched_name),
-		getNoun(result.Score),
+		getNoun(result.Score, threshold),
 		time.Now().Format(time.RFC3339),
 	)
 }
