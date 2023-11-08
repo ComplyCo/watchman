@@ -62,9 +62,9 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", handler.Filename))
 		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Length", fmt.Sprint(len(output)))
+		reader := strings.NewReader(output)
+		_, err = io.Copy(w, reader)
 
-		_, err = w.Write([]byte(output))
 		if err != nil {
 			http.Error(w, "Unable to write response", http.StatusInternalServerError)
 			return
@@ -104,10 +104,11 @@ type ChanResult struct {
 }
 
 func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, log log.Logger) ([]string, error) {
-	log.Info().Log("Processing rows")
 	// First row is headers, store them
 	headings := rows[0]
 	rows = rows[1:]
+	input_size := len(rows)
+	log.Info().Logf("Processing %d rows", input_size)
 
 	var wg sync.WaitGroup
 	workers := syncutil.NewGate(runtime.NumCPU())
@@ -128,11 +129,11 @@ func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts
 				return
 			} else {
 				if result.IsSet {
-					log.Debug().Log(newSearchResultString(result, name))
+					// log.Debug().Log(newSearchResultString(result, name))
 					resultsChan <- ChanResult{Value: newSearchResultRecord(result, row), Index: i}
 
 				} else {
-					log.Debug().Logf("[RESULT] no hits for %s", name)
+					// log.Debug().Logf("[RESULT] no hits for %s", name)
 					resultsChan <- ChanResult{Value: newSearchResultClearRecord(result, row), Index: i}
 				}
 			}
@@ -148,7 +149,12 @@ func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts
 	for r := range resultsChan {
 		output[r.Index+1] = r.Value // +1 for header row
 	}
-	log.Debug().Logf("[SUCCESS] %d checks complete\n", len(rows))
+	output_size := len(output) - 1
+	if input_size == output_size {
+		log.Info().Logf("[SUCCESS] %d checks complete\n", output_size)
+	} else {
+		log.Info().Logf("[FAILURES] %d of %d checks complete\n", output_size, input_size)
+	}
 
 	return output, nil
 }
@@ -182,20 +188,20 @@ func getNoun(score float64) string {
 	return "Hit"
 }
 
-func newSearchResultString(result moov.SearchResult, searched_name string) string {
-	return fmt.Sprintf(
-		"[RESULT] found %s for %s: SdnName=%s; EntityID=%s; Type=%s; Score=%.2f; Programs=%v; Remarks=%s; Timestamp=%s",
-		getNoun(result.Score),
-		searched_name,
-		*result.SdnName,
-		*result.EntityID,
-		result.Type,
-		result.Score,
-		result.Programs,
-		result.Remarks,
-		time.Now().Format(time.RFC3339),
-	)
-}
+// func newSearchResultString(result moov.SearchResult, searched_name string) string {
+// 	return fmt.Sprintf(
+// 		"[RESULT] found %s for %s: SdnName=%s; EntityID=%s; Type=%s; Score=%.2f; Programs=%v; Remarks=%s; Timestamp=%s",
+// 		getNoun(result.Score),
+// 		searched_name,
+// 		*result.SdnName,
+// 		*result.EntityID,
+// 		result.Type,
+// 		result.Score,
+// 		result.Programs,
+// 		result.Remarks,
+// 		time.Now().Format(time.RFC3339),
+// 	)
+// }
 
 func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 	sdn_name_no_comma := *result.SdnName
@@ -256,6 +262,10 @@ func newSearchResult(query_result moov.OfacSdn, entity_id string, score float64)
  * return SearchResult struct with: EntityID, SdnName, Type, Score, Programs
  */
 func searchByName(api *moov.APIClient, search_opts moov.SearchOpts, name string, log log.Logger) (moov.SearchResult, error) {
+	if name == "" {
+		return moov.SearchResult{}, fmt.Errorf("searchByName: name is empty")
+	}
+
 	search_opts.Name = optional.NewString(name)
 	empty_result := moov.SearchResult{
 		IsSet:    false,
@@ -271,11 +281,11 @@ func searchByName(api *moov.APIClient, search_opts moov.SearchOpts, name string,
 
 	search_result, resp, err := api.WatchmanApi.Search(ctx, &search_opts)
 	if err != nil {
-		return empty_result, fmt.Errorf("cc_searchByName: %v", err)
+		return empty_result, fmt.Errorf("searchByName.Search: %v", err)
 	}
 	defer resp.Body.Close()
 
-	log.Debug().Logf("[VERBOSE] search_result SDNs=%d; AltNames=%d", len(search_result.SDNs), len(search_result.AltNames))
+	// log.Debug().Logf("[VERBOSE] search_result SDNs=%d; AltNames=%d", len(search_result.SDNs), len(search_result.AltNames))
 
 	// Return SDN if found
 	if len(search_result.SDNs) > 0 {
@@ -287,15 +297,15 @@ func searchByName(api *moov.APIClient, search_opts moov.SearchOpts, name string,
 	//  If no SDN for name, check "customer" via EntityID
 	if len(search_result.AltNames) > 0 {
 		altEntityID := search_result.AltNames[0].EntityID
-		log.Debug().Logf("[VERBOSE] alternateName=%s; altEntityID=%s", search_result.AltNames[0].AlternateName, altEntityID)
+		// log.Debug().Logf("[VERBOSE] alternateName=%s; altEntityID=%s", search_result.AltNames[0].AlternateName, altEntityID)
 
 		customer_result, customer_resp, customer_err := api.WatchmanApi.GetOfacCustomer(ctx, altEntityID, &moov.GetOfacCustomerOpts{})
 		if customer_err != nil {
-			return empty_result, fmt.Errorf("cc_searchByName: %v", err)
+			return empty_result, fmt.Errorf("searchByName.GetOfacCustomer: %v", err)
 		}
 		defer customer_resp.Body.Close()
 
-		log.Debug().Logf("[VERBOSE] customer_result=%v", customer_result.Sdn)
+		// log.Debug().Logf("[VERBOSE] customer_result=%v", customer_result.Sdn)
 
 		if customer_result.Sdn.EntityID == altEntityID {
 			return newSearchResult(customer_result.Sdn, altEntityID, float64(search_result.AltNames[0].Match)), nil
