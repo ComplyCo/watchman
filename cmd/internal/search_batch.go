@@ -121,9 +121,7 @@ func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts
 			defer workers.Done()
 			defer wg.Done()
 
-			// Compose name from fixed columns - make smarter, later
-			cols := strings.Split(row, ",")
-			name := fmt.Sprintf("%s, %s", cols[2], cols[1])
+			name := getNameFromRow(row)
 
 			if result, err := searchByName(api, search_opts, name, log); err != nil {
 				log.Fatal().LogErrorf("[FATAL] problem searching for '%s': %v", name, err)
@@ -153,6 +151,25 @@ func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts
 	log.Debug().Logf("[SUCCESS] %d checks complete\n", len(rows))
 
 	return output, nil
+}
+
+func getNameFromRow(row string) string {
+	cols := strings.Split(row, ",")
+
+	if len(cols) >= 3 {
+		// If 3 or more columns, assume first is an ID
+		return fmt.Sprintf("%s, %s", trimDelimiters(cols[2]), trimDelimiters(cols[1]))
+	} else if len(cols) == 2 {
+		// If 2 columns, assume both are name fields
+		return fmt.Sprintf("%s, %s", trimDelimiters(cols[1]), trimDelimiters(cols[0]))
+	} else {
+		return trimDelimiters(cols[0])
+	}
+}
+
+func trimDelimiters(s string) string {
+	// Remove characters that cause problems with search
+	return strings.Trim(s, ",\n\r\t")
 }
 
 func getNoun(score float64) string {
@@ -189,7 +206,7 @@ func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 
 	return fmt.Sprintf(
 		"%s,%s,%s,%s,%.2f,%s,%s",
-		strings.TrimRight(input_row, ","),
+		trimDelimiters(input_row),
 		getNoun(result.Score),
 		sdn_name_no_comma,
 		*result.EntityID,
@@ -202,7 +219,7 @@ func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 func newSearchResultClearRecord(result moov.SearchResult, searched_name string) string {
 	return fmt.Sprintf(
 		"%s,%s,,,,,%s",
-		strings.TrimRight(searched_name, ","),
+		trimDelimiters(searched_name),
 		getNoun(result.Score),
 		time.Now().Format(time.RFC3339),
 	)
@@ -211,7 +228,7 @@ func newSearchResultClearRecord(result moov.SearchResult, searched_name string) 
 func writeHeadings(original_headings string) string {
 	return fmt.Sprintf(
 		"%s,%s,%s,%s,%s,%s,%s",
-		strings.TrimRight(original_headings, ","),
+		trimDelimiters(original_headings),
 		"Result",
 		"SdnName",
 		"EntityID",
