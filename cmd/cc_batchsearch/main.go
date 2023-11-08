@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/antihax/optional"
 	"github.com/moov-io/base/log"
 
 	"github.com/moov-io/watchman"
@@ -20,10 +21,13 @@ import (
 )
 
 var (
-	flagApiAddress = flag.String("address", internal.DefaultApiAddress, "Moov API address")
-	flagLocal      = flag.Bool("local", true, "Use local HTTP addresses")
-	flagFile       = flag.String("file", "", "Filepath to file with names to check")
-	flagWriteFile  = flag.Bool("write", false, "Write results to file, name will be <file>_output.csv")
+	flagApiAddress   = flag.String("address", internal.DefaultApiAddress, "Moov API address")
+	flagLocal        = flag.Bool("local", true, "Use local HTTP addresses")
+	flagFile         = flag.String("file", "", "Filepath to file with names to check")
+	flagMinNameScore = flag.Float64("min-match", 0.90, "How close must names match")
+	flagSdnType      = flag.String("sdn-type", "individual", "sdnType query param")
+	flagThreshold    = flag.Float64("threshold", 0.99, "Minimum match percentage required for blocking")
+	flagWriteFile    = flag.Bool("write", false, "Write results to file, name will be <file>_output.csv")
 )
 
 func main() {
@@ -51,7 +55,8 @@ func main() {
 			log.Fatal().LogErrorf("[FAILURE] %v", err)
 		}
 
-		result, err := internal.ProcessRows(rows, api, log)
+		search_opts := newSearchOptsFromFlags()
+		result, err := internal.ProcessRows(rows, api, search_opts, log)
 
 		if err != nil {
 			log.Fatal().LogErrorf("[FAILURE] %v", err)
@@ -64,6 +69,26 @@ func main() {
 		}
 
 	}
+}
+
+func newSearchOptsFromFlags() moov.SearchOpts {
+	search_opts := moov.SearchOpts{
+		Limit:    optional.NewInt32(1),
+		MinMatch: optional.NewFloat32(0.90),
+		SdnType:  optional.NewInterface("individual"),
+	}
+
+	if *flagThreshold != 0 {
+		search_opts.MinMatch = optional.NewFloat32(float32(*flagThreshold))
+	}
+	if *flagMinNameScore != 0 {
+		search_opts.MinMatch = optional.NewFloat32(float32(*flagMinNameScore))
+	}
+	if *flagSdnType != "" {
+		search_opts.SdnType = optional.NewInterface(*flagSdnType)
+	}
+
+	return search_opts
 }
 
 func ping(ctx context.Context, api *moov.APIClient) error {

@@ -11,7 +11,6 @@ package internal
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,12 +26,7 @@ import (
 	"go4.org/syncutil"
 )
 
-var (
-	flagMinNameScore = flag.Float64("min-match", 0.90, "How close must names match")
-	flagRequestID    = flag.String("request-id", "", "Override what is set for the X-Request-ID HTTP header")
-	flagSdnType      = flag.String("sdn-type", "individual", "sdnType query param")
-	flagThreshold    = flag.Float64("threshold", 0.99, "Minimum match percentage required for blocking")
-)
+var matchThreshold float64 = 0.99
 
 func SearchBatch(logger log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +35,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 			http.Error(w, "Unable to parse form", http.StatusBadRequest)
 			return
 		}
-		setFlagsFromFormFields(r)
+		search_opts := newSearchOptsFromFormFields(r)
 
 		file, handler, err := r.FormFile("csvFile")
 		if err != nil {
@@ -59,7 +53,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 		rows := strings.Split(string(input), "\n")
 		conf := Config(DefaultApiAddress, true)
 		api := moov.NewAPIClient(conf)
-		result, err := ProcessRows(rows, api, logger)
+		result, err := ProcessRows(rows, api, search_opts, logger)
 		if err != nil {
 			http.Error(w, "Unable to process input", http.StatusInternalServerError)
 			return
@@ -78,29 +72,30 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 	}
 }
 
-func setFlagsFromFormFields(r *http.Request) {
+func newSearchOptsFromFormFields(r *http.Request) moov.SearchOpts {
+	search_opts := &moov.SearchOpts{
+		Limit:    optional.NewInt32(1),
+		MinMatch: optional.NewFloat32(0.90),
+		SdnType:  optional.NewInterface("individual"),
+	}
+
 	if threshold := r.FormValue("threshold"); threshold != "" {
 		if f, err := strconv.ParseFloat(threshold, 64); err == nil {
-			*flagThreshold = f
+			matchThreshold = f
 		}
 	} else {
-		*flagThreshold = 0.99
+		matchThreshold = 0.99
 	}
 	if min_match := r.FormValue("min-match"); min_match != "" {
 		if f, err := strconv.ParseFloat(min_match, 64); err == nil {
-			*flagMinNameScore = f
+			search_opts.MinMatch = optional.NewFloat32(float32(f))
 		}
-	} else {
-		*flagMinNameScore = 0.90
 	}
 	if sdn_type := r.FormValue("sdn-type"); sdn_type != "" {
-		*flagSdnType = sdn_type
-	} else {
-		*flagSdnType = "individual"
+		search_opts.SdnType = optional.NewInterface(sdn_type)
 	}
-	if request_id := r.FormValue("request-id"); request_id != "" {
-		*flagRequestID = request_id
-	}
+
+	return *search_opts
 }
 
 type ChanResult struct {
@@ -108,7 +103,7 @@ type ChanResult struct {
 	Value string
 }
 
-func ProcessRows(rows []string, api *moov.APIClient, log log.Logger) ([]string, error) {
+func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, log log.Logger) ([]string, error) {
 	log.Info().Log("Processing rows")
 	// First row is headers, store them
 	headings := rows[0]
@@ -130,7 +125,7 @@ func ProcessRows(rows []string, api *moov.APIClient, log log.Logger) ([]string, 
 			cols := strings.Split(row, ",")
 			name := fmt.Sprintf("%s, %s", cols[2], cols[1])
 
-			if result, err := searchByName(api, name, log); err != nil {
+			if result, err := searchByName(api, search_opts, name, log); err != nil {
 				log.Fatal().LogErrorf("[FATAL] problem searching for '%s': %v", name, err)
 				return
 			} else {
@@ -164,7 +159,7 @@ func getNoun(score float64) string {
 	if score < 0.0 {
 		return "Clear"
 	}
-	if score >= *flagThreshold {
+	if score >= matchThreshold {
 		return "MATCH"
 	}
 	return "Hit"
@@ -243,14 +238,8 @@ func newSearchResult(query_result moov.OfacSdn, entity_id string, score float64)
  *
  * return SearchResult struct with: EntityID, SdnName, Type, Score, Programs
  */
-func searchByName(api *moov.APIClient, name string, log log.Logger) (moov.SearchResult, error) {
-	opts := &moov.SearchOpts{
-		Limit:      optional.NewInt32(1),
-		Name:       optional.NewString(name),
-		MinMatch:   optional.NewFloat32(float32(*flagMinNameScore)),
-		SdnType:    optional.NewInterface(*flagSdnType),
-		XRequestID: optional.NewString(*flagRequestID),
-	}
+func searchByName(api *moov.APIClient, search_opts moov.SearchOpts, name string, log log.Logger) (moov.SearchResult, error) {
+	search_opts.Name = optional.NewString(name)
 	empty_result := moov.SearchResult{
 		IsSet:    false,
 		EntityID: nil,
@@ -263,7 +252,7 @@ func searchByName(api *moov.APIClient, name string, log log.Logger) (moov.Search
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer cancelFunc()
 
-	search_result, resp, err := api.WatchmanApi.Search(ctx, opts)
+	search_result, resp, err := api.WatchmanApi.Search(ctx, &search_opts)
 	if err != nil {
 		return empty_result, fmt.Errorf("cc_searchByName: %v", err)
 	}
