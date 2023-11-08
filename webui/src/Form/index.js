@@ -189,10 +189,11 @@ export default ({ onSubmit }) => {
         <Container>
           <h2>Instructions</h2>
           <p>
-            Minimum Name Score: the fuzziness level for name matching<br/>
-            Match Threshold: the minimum score to be considered a match (vs a hit)<br/>
-            Type: the SDN type to search for (individual, entity, vessel, aircraft, all)<br/>
+            <b>Minimum Name Score:</b> the fuzziness level for name matching<br/>
+            <b>Match Threshold:</b> the minimum score to be considered a match (vs a hit)<br/>
+            <b>Type:</b> the SDN type to search for (individual, entity, vessel, aircraft, all)<br/>
           </p>
+          <p>Currently we only process the first <b>300</b> rows per file.</p>
           <p>The input CSV file must contain at least three columns:</p>
           <ol>
             <li><i>anything</i></li>

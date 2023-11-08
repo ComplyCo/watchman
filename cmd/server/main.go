@@ -88,9 +88,9 @@ func main() {
 	addPingRoute(router)
 
 	// Start business HTTP server
-	readTimeout, _ := time.ParseDuration("30s")
-	writTimeout, _ := time.ParseDuration("30s")
-	idleTimeout, _ := time.ParseDuration("60s")
+	readTimeout, _ := time.ParseDuration("120s")
+	writTimeout, _ := time.ParseDuration("120s")
+	idleTimeout, _ := time.ParseDuration("120s")
 
 	// Check to see if our -http.addr flag has been overridden
 	if v := os.Getenv("HTTP_BIND_ADDRESS"); v != "" {

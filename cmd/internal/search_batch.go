@@ -10,6 +10,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 			return
 		}
 		search_opts := newSearchOptsFromFormFields(r)
+		max_rows := 300 // limit num rows to defend against AWS limits
 		match_threshold := 0.99
 		if threshold := r.FormValue("threshold"); threshold != "" {
 			if f, err := strconv.ParseFloat(threshold, 64); err == nil {
@@ -57,7 +59,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 		rows := strings.Split(string(input), "\n")
 		conf := Config(DefaultApiAddress, true)
 		api := moov.NewAPIClient(conf)
-		result, err := ProcessRows(rows, api, search_opts, match_threshold, logger)
+		result, err := ProcessRows(rows, api, search_opts, match_threshold, max_rows, logger)
 		if err != nil {
 			http.Error(w, "Unable to process input", http.StatusInternalServerError)
 			return
@@ -67,8 +69,15 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", handler.Filename))
 		w.Header().Set("Content-Type", "text/csv")
 		reader := strings.NewReader(output)
-		_, err = io.Copy(w, reader)
+		buf := new(bytes.Buffer)
 
+		_, err = io.Copy(buf, reader)
+		if err != nil {
+			http.Error(w, "Unable to write response", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = buf.WriteTo(w)
 		if err != nil {
 			http.Error(w, "Unable to write response", http.StatusInternalServerError)
 			return
@@ -100,10 +109,10 @@ type ChanResult struct {
 	Value string
 }
 
-func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, threshold float64, log log.Logger) ([]string, error) {
+func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, threshold float64, max_rows int, log log.Logger) ([]string, error) {
 	// First row is headers, store them
 	headings := rows[0]
-	rows = rows[1:]
+	rows = rows[1 : max_rows+1]
 	input_size := len(rows)
 	log.Info().Logf("Processing %d rows", input_size)
 

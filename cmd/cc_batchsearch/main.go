@@ -24,6 +24,7 @@ var (
 	flagApiAddress   = flag.String("address", internal.DefaultApiAddress, "Moov API address")
 	flagLocal        = flag.Bool("local", true, "Use local HTTP addresses")
 	flagFile         = flag.String("file", "", "Filepath to file with names to check")
+	flagMaxRows      = flag.Int("max-rows", 300, "Maximum number of rows to process")
 	flagMinNameScore = flag.Float64("min-match", 0.90, "How close must names match")
 	flagSdnType      = flag.String("sdn-type", "individual", "sdnType query param")
 	flagThreshold    = flag.Float64("threshold", 0.99, "Minimum match percentage required for blocking")
@@ -56,7 +57,7 @@ func main() {
 		}
 
 		search_opts := newSearchOptsFromFlags()
-		result, err := internal.ProcessRows(rows, api, search_opts, log)
+		result, err := internal.ProcessRows(rows, api, search_opts, *flagThreshold, *flagMaxRows, log)
 
 		if err != nil {
 			log.Fatal().LogErrorf("[FAILURE] %v", err)
