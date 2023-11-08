@@ -10,8 +10,8 @@
 package internal
 
 import (
+	"bytes"
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,21 +27,21 @@ import (
 	"go4.org/syncutil"
 )
 
-var (
-	flagMinNameScore = flag.Float64("min-match", 0.90, "How close must names match")
-	flagRequestID    = flag.String("request-id", "", "Override what is set for the X-Request-ID HTTP header")
-	flagSdnType      = flag.String("sdn-type", "individual", "sdnType query param")
-	flagThreshold    = flag.Float64("threshold", 0.99, "Minimum match percentage required for blocking")
-)
-
 func SearchBatch(logger log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := r.ParseMultipartForm(128 << 20) // 128 MB limit for file size
+		err := r.ParseMultipartForm(10 << 20) // 10 MB limit for file size
 		if err != nil {
 			http.Error(w, "Unable to parse form", http.StatusBadRequest)
 			return
 		}
-		setFlagsFromFormFields(r)
+		search_opts := newSearchOptsFromFormFields(r)
+		max_rows := 300 // limit num rows to defend against AWS limits
+		match_threshold := 0.99
+		if threshold := r.FormValue("threshold"); threshold != "" {
+			if f, err := strconv.ParseFloat(threshold, 64); err == nil {
+				match_threshold = f
+			}
+		}
 
 		file, handler, err := r.FormFile("csvFile")
 		if err != nil {
@@ -59,7 +59,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 		rows := strings.Split(string(input), "\n")
 		conf := Config(DefaultApiAddress, true)
 		api := moov.NewAPIClient(conf)
-		result, err := ProcessRows(rows, api, logger)
+		result, err := ProcessRows(rows, api, search_opts, match_threshold, max_rows, logger)
 		if err != nil {
 			http.Error(w, "Unable to process input", http.StatusInternalServerError)
 			return
@@ -68,9 +68,16 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", handler.Filename))
 		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Length", fmt.Sprint(len(output)))
+		reader := strings.NewReader(output)
+		buf := new(bytes.Buffer)
 
-		_, err = w.Write([]byte(output))
+		_, err = io.Copy(buf, reader)
+		if err != nil {
+			http.Error(w, "Unable to write response", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = buf.WriteTo(w)
 		if err != nil {
 			http.Error(w, "Unable to write response", http.StatusInternalServerError)
 			return
@@ -78,29 +85,23 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 	}
 }
 
-func setFlagsFromFormFields(r *http.Request) {
-	if threshold := r.FormValue("threshold"); threshold != "" {
-		if f, err := strconv.ParseFloat(threshold, 64); err == nil {
-			*flagThreshold = f
-		}
-	} else {
-		*flagThreshold = 0.99
+func newSearchOptsFromFormFields(r *http.Request) moov.SearchOpts {
+	search_opts := &moov.SearchOpts{
+		Limit:    optional.NewInt32(1),
+		MinMatch: optional.NewFloat32(0.90),
+		SdnType:  optional.NewInterface("individual"),
 	}
+
 	if min_match := r.FormValue("min-match"); min_match != "" {
 		if f, err := strconv.ParseFloat(min_match, 64); err == nil {
-			*flagMinNameScore = f
+			search_opts.MinMatch = optional.NewFloat32(float32(f))
 		}
-	} else {
-		*flagMinNameScore = 0.90
 	}
 	if sdn_type := r.FormValue("sdn-type"); sdn_type != "" {
-		*flagSdnType = sdn_type
-	} else {
-		*flagSdnType = "individual"
+		search_opts.SdnType = optional.NewInterface(sdn_type)
 	}
-	if request_id := r.FormValue("request-id"); request_id != "" {
-		*flagRequestID = request_id
-	}
+
+	return *search_opts
 }
 
 type ChanResult struct {
@@ -108,11 +109,12 @@ type ChanResult struct {
 	Value string
 }
 
-func ProcessRows(rows []string, api *moov.APIClient, log log.Logger) ([]string, error) {
-	log.Info().Log("Processing rows")
+func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, threshold float64, max_rows int, log log.Logger) ([]string, error) {
 	// First row is headers, store them
 	headings := rows[0]
-	rows = rows[1:]
+	rows = rows[1 : max_rows+1]
+	input_size := len(rows)
+	log.Info().Logf("Processing %d rows", input_size)
 
 	var wg sync.WaitGroup
 	workers := syncutil.NewGate(runtime.NumCPU())
@@ -126,21 +128,19 @@ func ProcessRows(rows []string, api *moov.APIClient, log log.Logger) ([]string, 
 			defer workers.Done()
 			defer wg.Done()
 
-			// Compose name from fixed columns - make smarter, later
-			cols := strings.Split(row, ",")
-			name := fmt.Sprintf("%s, %s", cols[2], cols[1])
+			name := getNameFromRow(row)
 
-			if result, err := searchByName(api, name, log); err != nil {
+			if result, err := searchByName(api, search_opts, name, log); err != nil {
 				log.Fatal().LogErrorf("[FATAL] problem searching for '%s': %v", name, err)
 				return
 			} else {
 				if result.IsSet {
-					log.Debug().Log(newSearchResultString(result, name))
-					resultsChan <- ChanResult{Value: newSearchResultRecord(result, row), Index: i}
+					// log.Debug().Log(newSearchResultString(result, name))
+					resultsChan <- ChanResult{Value: newSearchResultRecord(result, row, threshold), Index: i}
 
 				} else {
-					log.Debug().Logf("[RESULT] no hits for %s", name)
-					resultsChan <- ChanResult{Value: newSearchResultClearRecord(result, row), Index: i}
+					// log.Debug().Logf("[RESULT] no hits for %s", name)
+					resultsChan <- ChanResult{Value: newSearchResultClearRecord(result, row, threshold), Index: i}
 				}
 			}
 		}(i, row)
@@ -155,37 +155,61 @@ func ProcessRows(rows []string, api *moov.APIClient, log log.Logger) ([]string, 
 	for r := range resultsChan {
 		output[r.Index+1] = r.Value // +1 for header row
 	}
-	log.Debug().Logf("[SUCCESS] %d checks complete\n", len(rows))
+	output_size := len(output) - 1
+	if input_size == output_size {
+		log.Info().Logf("[SUCCESS] %d checks complete\n", output_size)
+	} else {
+		log.Info().Logf("[FAILURES] %d of %d checks complete\n", output_size, input_size)
+	}
 
 	return output, nil
 }
 
-func getNoun(score float64) string {
+func getNameFromRow(row string) string {
+	cols := strings.Split(row, ",")
+
+	if len(cols) >= 3 {
+		// If 3 or more columns, assume first is an ID
+		return fmt.Sprintf("%s, %s", trimDelimiters(cols[2]), trimDelimiters(cols[1]))
+	} else if len(cols) == 2 {
+		// If 2 columns, assume both are name fields
+		return fmt.Sprintf("%s, %s", trimDelimiters(cols[1]), trimDelimiters(cols[0]))
+	} else {
+		return trimDelimiters(cols[0])
+	}
+}
+
+func trimDelimiters(s string) string {
+	// Remove characters that cause problems with search
+	return strings.Trim(s, ",\n\r\t")
+}
+
+func getNoun(score float64, threshold float64) string {
 	if score < 0.0 {
 		return "Clear"
 	}
-	if score >= *flagThreshold {
+	if score >= threshold {
 		return "MATCH"
 	}
 	return "Hit"
 }
 
-func newSearchResultString(result moov.SearchResult, searched_name string) string {
-	return fmt.Sprintf(
-		"[RESULT] found %s for %s: SdnName=%s; EntityID=%s; Type=%s; Score=%.2f; Programs=%v; Remarks=%s; Timestamp=%s",
-		getNoun(result.Score),
-		searched_name,
-		*result.SdnName,
-		*result.EntityID,
-		result.Type,
-		result.Score,
-		result.Programs,
-		result.Remarks,
-		time.Now().Format(time.RFC3339),
-	)
-}
+// func newSearchResultString(result moov.SearchResult, searched_name string) string {
+// 	return fmt.Sprintf(
+// 		"[RESULT] found %s for %s: SdnName=%s; EntityID=%s; Type=%s; Score=%.2f; Programs=%v; Remarks=%s; Timestamp=%s",
+// 		getNoun(result.Score),
+// 		searched_name,
+// 		*result.SdnName,
+// 		*result.EntityID,
+// 		result.Type,
+// 		result.Score,
+// 		result.Programs,
+// 		result.Remarks,
+// 		time.Now().Format(time.RFC3339),
+// 	)
+// }
 
-func newSearchResultRecord(result moov.SearchResult, input_row string) string {
+func newSearchResultRecord(result moov.SearchResult, input_row string, threshold float64) string {
 	sdn_name_no_comma := *result.SdnName
 	if strings.Contains(*result.SdnName, ",") {
 		sdn_name_parts := strings.Split(*result.SdnName, ",")
@@ -194,8 +218,8 @@ func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 
 	return fmt.Sprintf(
 		"%s,%s,%s,%s,%.2f,%s,%s",
-		strings.TrimRight(input_row, ","),
-		getNoun(result.Score),
+		trimDelimiters(input_row),
+		getNoun(result.Score, threshold),
 		sdn_name_no_comma,
 		*result.EntityID,
 		result.Score,
@@ -204,11 +228,11 @@ func newSearchResultRecord(result moov.SearchResult, input_row string) string {
 	)
 }
 
-func newSearchResultClearRecord(result moov.SearchResult, searched_name string) string {
+func newSearchResultClearRecord(result moov.SearchResult, searched_name string, threshold float64) string {
 	return fmt.Sprintf(
 		"%s,%s,,,,,%s",
-		strings.TrimRight(searched_name, ","),
-		getNoun(result.Score),
+		trimDelimiters(searched_name),
+		getNoun(result.Score, threshold),
 		time.Now().Format(time.RFC3339),
 	)
 }
@@ -216,7 +240,7 @@ func newSearchResultClearRecord(result moov.SearchResult, searched_name string) 
 func writeHeadings(original_headings string) string {
 	return fmt.Sprintf(
 		"%s,%s,%s,%s,%s,%s,%s",
-		strings.TrimRight(original_headings, ","),
+		trimDelimiters(original_headings),
 		"Result",
 		"SdnName",
 		"EntityID",
@@ -243,14 +267,12 @@ func newSearchResult(query_result moov.OfacSdn, entity_id string, score float64)
  *
  * return SearchResult struct with: EntityID, SdnName, Type, Score, Programs
  */
-func searchByName(api *moov.APIClient, name string, log log.Logger) (moov.SearchResult, error) {
-	opts := &moov.SearchOpts{
-		Limit:      optional.NewInt32(1),
-		Name:       optional.NewString(name),
-		MinMatch:   optional.NewFloat32(float32(*flagMinNameScore)),
-		SdnType:    optional.NewInterface(*flagSdnType),
-		XRequestID: optional.NewString(*flagRequestID),
+func searchByName(api *moov.APIClient, search_opts moov.SearchOpts, name string, log log.Logger) (moov.SearchResult, error) {
+	if name == "" {
+		return moov.SearchResult{}, fmt.Errorf("searchByName: name is empty")
 	}
+
+	search_opts.Name = optional.NewString(name)
 	empty_result := moov.SearchResult{
 		IsSet:    false,
 		EntityID: nil,
@@ -263,13 +285,13 @@ func searchByName(api *moov.APIClient, name string, log log.Logger) (moov.Search
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer cancelFunc()
 
-	search_result, resp, err := api.WatchmanApi.Search(ctx, opts)
+	search_result, resp, err := api.WatchmanApi.Search(ctx, &search_opts)
 	if err != nil {
-		return empty_result, fmt.Errorf("cc_searchByName: %v", err)
+		return empty_result, fmt.Errorf("searchByName.Search: %v", err)
 	}
 	defer resp.Body.Close()
 
-	log.Debug().Logf("[VERBOSE] search_result SDNs=%d; AltNames=%d", len(search_result.SDNs), len(search_result.AltNames))
+	// log.Debug().Logf("[VERBOSE] search_result SDNs=%d; AltNames=%d", len(search_result.SDNs), len(search_result.AltNames))
 
 	// Return SDN if found
 	if len(search_result.SDNs) > 0 {
@@ -281,15 +303,15 @@ func searchByName(api *moov.APIClient, name string, log log.Logger) (moov.Search
 	//  If no SDN for name, check "customer" via EntityID
 	if len(search_result.AltNames) > 0 {
 		altEntityID := search_result.AltNames[0].EntityID
-		log.Debug().Logf("[VERBOSE] alternateName=%s; altEntityID=%s", search_result.AltNames[0].AlternateName, altEntityID)
+		// log.Debug().Logf("[VERBOSE] alternateName=%s; altEntityID=%s", search_result.AltNames[0].AlternateName, altEntityID)
 
 		customer_result, customer_resp, customer_err := api.WatchmanApi.GetOfacCustomer(ctx, altEntityID, &moov.GetOfacCustomerOpts{})
 		if customer_err != nil {
-			return empty_result, fmt.Errorf("cc_searchByName: %v", err)
+			return empty_result, fmt.Errorf("searchByName.GetOfacCustomer: %v", err)
 		}
 		defer customer_resp.Body.Close()
 
-		log.Debug().Logf("[VERBOSE] customer_result=%v", customer_result.Sdn)
+		// log.Debug().Logf("[VERBOSE] customer_result=%v", customer_result.Sdn)
 
 		if customer_result.Sdn.EntityID == altEntityID {
 			return newSearchResult(customer_result.Sdn, altEntityID, float64(search_result.AltNames[0].Match)), nil

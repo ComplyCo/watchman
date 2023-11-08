@@ -60,11 +60,6 @@ function App() {
     }
   };
 
-  const handleReset = () => {
-    dispatch({ type: "SEARCH_RESET" });
-    history.push({ ...history.location, search: "" });
-  };
-
   const handleSubmit = values => {
     if (valuesOnlyContainLimit(values)) return;
     const qs = buildQueryString(values);
@@ -80,16 +75,10 @@ function App() {
       `}
     >
       <Container>
-        <h1>Moov Watchman</h1>
-        <p>Moov Watchman is a service which downloads, parses and indexes numerous trade, government and non-profit lists of blocked individuals and entities to comply with those regions laws.</p>
-        <p>
-          <a css={`color: #0000EE;`} href="https://github.com/moov-io/watchman">GitHub</a> |&nbsp;
-          <a css={`color: #0000EE;`} href="https://moov-io.github.io/watchman/">Documentation</a> |&nbsp;
-          <a css={`color: #0000EE;`} href="https://moov-io.github.io/watchman/api/">API Endpoints</a>
-        </p>
+        <h1>OFAC Search</h1>
+        <p>Search OFAC data using names from a CSV file.</p>
       </Container>
-      <Form onSubmit={handleSubmit} onReset={handleReset} />
-      <Results data={state} />
+      <Form onSubmit={handleSubmit} />
     </div>
   );
 }
