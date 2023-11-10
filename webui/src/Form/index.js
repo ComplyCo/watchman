@@ -94,6 +94,10 @@ export default ({ onSubmit }) => {
     })
       .then(response => {
         if (response.ok) {
+          const warning = response.headers.get("X-Truncation-Warning");
+          if (warning != null) {
+            alert(warning);
+          }
           return response.text();
         } else {
           throw new Error("Request failed with status: " + response.status);
@@ -190,10 +194,10 @@ export default ({ onSubmit }) => {
           <h2>Instructions</h2>
           <p>
             <b>Minimum Name Score:</b> the fuzziness level for name matching<br/>
-            <b>Match Threshold:</b> the minimum score to be considered a match (vs a hit)<br/>
+            <b>Match Threshold:</b> above this is considered a match, below a hit<br/>
             <b>Type:</b> the SDN type to search for (individual, entity, vessel, aircraft, all)<br/>
           </p>
-          <p>Currently we only process the first <b>300</b> rows per file.</p>
+          <p>Currently we only process the first <b>301</b> rows (header row + 300 records).</p>
           <p>The input CSV file must contain at least three columns:</p>
           <ol>
             <li><i>anything</i></li>
@@ -214,7 +218,7 @@ export default ({ onSubmit }) => {
               {`123,Smith,John Jacob`}
             </code>
           </pre>
-          <p>Search results will be appended to each row and a new file will be downloaded.</p>
+          <p>Search results are appended to each row, a new file will be downloaded.</p>
         </Container>
       </TwoColumns>
     </Container>

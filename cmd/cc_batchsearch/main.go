@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -24,7 +25,7 @@ var (
 	flagApiAddress   = flag.String("address", internal.DefaultApiAddress, "Moov API address")
 	flagLocal        = flag.Bool("local", true, "Use local HTTP addresses")
 	flagFile         = flag.String("file", "", "Filepath to file with names to check")
-	flagMaxRows      = flag.Int("max-rows", 300, "Maximum number of rows to process")
+	flagMaxRows      = flag.Int("max-rows", 301, "Maximum number of rows to process")
 	flagMinNameScore = flag.Float64("min-match", 0.90, "How close must names match")
 	flagSdnType      = flag.String("sdn-type", "individual", "sdnType query param")
 	flagThreshold    = flag.Float64("threshold", 0.99, "Minimum match percentage required for blocking")
@@ -56,8 +57,10 @@ func main() {
 			log.Fatal().LogErrorf("[FAILURE] %v", err)
 		}
 
+		original_row_count := len(rows)
+		max_rows := int(math.Min(float64(*flagMaxRows), float64(original_row_count)))
 		search_opts := newSearchOptsFromFlags()
-		result, err := internal.ProcessRows(rows, api, search_opts, *flagThreshold, *flagMaxRows, log)
+		result, err := internal.ProcessRows(rows, api, search_opts, *flagThreshold, max_rows, log)
 
 		if err != nil {
 			log.Fatal().LogErrorf("[FAILURE] %v", err)
@@ -66,9 +69,14 @@ func main() {
 		if *flagWriteFile {
 			if err := writeResultsToFile(result); err != nil {
 				log.Fatal().LogErrorf("[FATAL] problem writing to file: %v", err)
+			} else {
+				if original_row_count > max_rows {
+					log.Info().Logf("[INFO] ONLY PROCESSED %d of %d rows from file", max_rows, original_row_count)
+				} else {
+					log.Info().Logf("[SUCCESS] processed %d rows from file", original_row_count)
+				}
 			}
 		}
-
 	}
 }
 

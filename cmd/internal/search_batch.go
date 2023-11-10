@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -35,7 +36,7 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 			return
 		}
 		search_opts := newSearchOptsFromFormFields(r)
-		max_rows := 300 // limit num rows to defend against AWS limits
+
 		match_threshold := 0.99
 		if threshold := r.FormValue("threshold"); threshold != "" {
 			if f, err := strconv.ParseFloat(threshold, 64); err == nil {
@@ -57,6 +58,10 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 		}
 
 		rows := strings.Split(string(input), "\n")
+		// Limit to 300 record searches, plus header = 301 rows in file
+		original_row_count := len(rows)
+		max_rows := int(math.Min(301, float64(original_row_count)))
+
 		conf := Config(DefaultApiAddress, true)
 		api := moov.NewAPIClient(conf)
 		result, err := ProcessRows(rows, api, search_opts, match_threshold, max_rows, logger)
@@ -68,6 +73,13 @@ func SearchBatch(logger log.Logger) http.HandlerFunc {
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", handler.Filename))
 		w.Header().Set("Content-Type", "text/csv")
+		if original_row_count > max_rows {
+			w.Header().Add(
+				"X-Truncation-Warning",
+				fmt.Sprintf("Your file contained %d rows, only the first %d were processed", original_row_count, max_rows),
+			)
+		}
+
 		reader := strings.NewReader(output)
 		buf := new(bytes.Buffer)
 
@@ -112,9 +124,9 @@ type ChanResult struct {
 func ProcessRows(rows []string, api *moov.APIClient, search_opts moov.SearchOpts, threshold float64, max_rows int, log log.Logger) ([]string, error) {
 	// First row is headers, store them
 	headings := rows[0]
-	rows = rows[1 : max_rows+1]
+	rows = rows[1:max_rows]
 	input_size := len(rows)
-	log.Info().Logf("Processing %d rows", input_size)
+	log.Info().Logf("Processing %d records", input_size)
 
 	var wg sync.WaitGroup
 	workers := syncutil.NewGate(runtime.NumCPU())
